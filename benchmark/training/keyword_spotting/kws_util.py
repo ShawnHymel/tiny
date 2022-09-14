@@ -172,6 +172,13 @@ def parse_command():
       help="""\
       For eval_quantized_model, which set to measure.
       """)
+  parser.add_argument(
+      '--data_out_dir',
+      type=str,
+      default=None,
+      help="""\
+      Where to save the augmented dataset (.wav files) after mixing in background noise.
+      """)
 
   Flags, unparsed = parser.parse_known_args()
   return Flags, unparsed

@@ -19,6 +19,9 @@ import keras_model as models
 word_labels = ["Down", "Go", "Left", "No", "Off", "On", "Right",
                "Stop", "Up", "Yes", "Silence", "Unknown"]
 
+# Global file counter
+file_counter = tf.Variable(0, dtype=tf.uint32)
+
 def convert_to_int16(sample_dict):
   audio = sample_dict['audio']
   label = sample_dict['label']
@@ -40,7 +43,7 @@ def convert_dataset(item):
   return audio, label
 
 
-def get_preprocess_audio_func(model_settings,is_training=False,background_data = []):
+def get_preprocess_audio_func(model_settings,is_training=False,background_data = [],out_dir=None):
   def prepare_processing_graph(next_element):
     """Builds a TensorFlow graph to apply the input distortions.
     Creates a graph that loads a WAVE file, decodes it, scales the volume,
@@ -82,6 +85,7 @@ def get_preprocess_audio_func(model_settings,is_training=False,background_data =
     padded_foreground = tf.pad(scaled_foreground, time_shift_padding_placeholder_, mode='CONSTANT')
     sliced_foreground = tf.slice(padded_foreground, time_shift_offset_placeholder_, [desired_samples])
   
+    # Mix background noise into each sample
     if is_training and background_data != []:
       background_volume_range = tf.constant(background_volume_range_,dtype=tf.float32)
       background_index = np.random.randint(len(background_data))
@@ -101,6 +105,28 @@ def get_preprocess_audio_func(model_settings,is_training=False,background_data =
                            background_volume_placeholder_)
       background_add = tf.add(background_mul, sliced_foreground)
       sliced_foreground = tf.clip_by_value(background_add, -1.0, 1.0)
+
+    # If an output data directory is set, save the augmented audio data as a .wav file
+    if out_dir != None:
+      
+      # On the first call of this function, declare some tensors to construct our file path
+      if not hasattr(prepare_processing_graph, "called"):
+        prepare_processing_graph.called = True
+        filename = tf.Variable("", dtype=tf.string)
+        filepath = tf.Variable("", dtype=tf.string)
+        audio_out = tf.Variable("", dtype=tf.string)
+      
+      # Construct file path
+      filename.assign(tf.strings.join([tf.gather(word_labels, next_element['label']), 
+                                        ".", 
+                                        tf.strings.as_string(file_counter), 
+                                        ".wav"]))
+      file_counter.assign_add(1)
+      filepath.assign(tf.strings.join([out_dir, os.sep, filename]))
+
+      # Write audio data to file
+      audio_out = tf.audio.encode_wav(tf.expand_dims(sliced_foreground, 0), 16000)
+      tf.io.write_file(filepath, audio_out)
     
     if model_settings['feature_type'] == 'mfcc':
       stfts = tf.signal.stft(sliced_foreground, frame_length=model_settings['window_size_samples'], 
@@ -279,15 +305,28 @@ def get_training_data(Flags, get_waves=False, val_cal_subset=False):
     ds_test  =  ds_test.map(cast_and_pad)
     ds_val   =   ds_val.map(cast_and_pad)
   else:
+
+    # Create output directories for our augmented data
+    if Flags.data_out_dir != None:
+      if not os.path.exists(os.path.join(Flags.data_out_dir, "train")):
+        os.makedirs(os.path.join(Flags.data_out_dir, "train"))
+      if not os.path.exists(os.path.join(Flags.data_out_dir, "test")):
+        os.makedirs(os.path.join(Flags.data_out_dir, "test"))
+      if not os.path.exists(os.path.join(Flags.data_out_dir, "val")):
+        os.makedirs(os.path.join(Flags.data_out_dir, "val"))
+
     # extract spectral features and add background noise
     ds_train = ds_train.map(get_preprocess_audio_func(model_settings,is_training=True,
-                                                      background_data=background_data),
+                                                      background_data=background_data,
+                                                      out_dir=os.path.join(Flags.data_out_dir, "train")),
                             num_parallel_calls=tf.data.experimental.AUTOTUNE)
     ds_test  =  ds_test.map(get_preprocess_audio_func(model_settings,is_training=False,
-                                                      background_data=background_data),
+                                                      background_data=background_data,
+                                                      out_dir=os.path.join(Flags.data_out_dir, "test")),
                             num_parallel_calls=tf.data.experimental.AUTOTUNE)
     ds_val   =   ds_val.map(get_preprocess_audio_func(model_settings,is_training=False,
-                                                      background_data=background_data),
+                                                      background_data=background_data,
+                                                      out_dir=os.path.join(Flags.data_out_dir, "val")),
                             num_parallel_calls=tf.data.experimental.AUTOTUNE)
     # change output from a dictionary to a feature,label tuple
     ds_train = ds_train.map(convert_dataset)
